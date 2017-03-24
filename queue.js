@@ -1,6 +1,9 @@
 const mz = require('izi/mz')
 const oops = require('izi/oops')
+const f = require('izi/flow')
+const formatDate = require('izi/date')('h:mm:ss')
 const map = require('izi/collection/map')
+const filter = require('izi/collection/filter')
 const each = require('izi/collection/each')
 const reduce = require('izi/collection/reduce')
 const { resolve } = require('path')
@@ -11,16 +14,18 @@ const writeOpts = { encoding, flag: 'a' }
 const ENOENT = oops('ENOENT')
 
 const logAndDie = err => {
-  console.error('error while storing user state change', err)
-  exit(1)
+  console.error(err)
+  //setTimeout(process.exit(1),
 }
 
 const storeChanges = (base, members, type) => id => {
   const ts = Date.now()
-  members[id].logs.push({ type, ts })
+  if (members[id]) {
+    members[id].logs.push({ type, ts })
+  }
 
   return writeFile(`${base}/${id}`, `${type}${ts}\n`, writeOpts)
-    .then(logAndDie)
+    .catch(logAndDie)
 }
 
 const toFileLog = ({ type, ts }) => `${type}${ts}`
@@ -44,7 +49,7 @@ const calcTime = reduce((acc, { type, ts }) => {
   return acc
 })
 
-const byTimestamp = (a, b) => a.ts - b.ts
+const byTimestamp = (a, b) => b.ts - a.ts
 const doubleRecords = ({ type }, i, all) => i
   ? all[i - 1].type !== type
   : type === '+'
@@ -54,20 +59,26 @@ const getTotalWait = ({ offtime = 0, start = Date.now() }) =>
 
 const parseFile = file => parseLines(file.split('\n'))
 
-module.exports = (guild, channel) => {
-  const base = resolve(`db/${guild.id}/${channel.id}`)
-  const blacklistFile = `${base}/blacklist.json`
+module.exports = guild => {
+  const base = resolve(`db/${guild.id}`)
+  const serverInfo = `${base}/info.json`
   const members = Object.create(null)
-  const blacklist = Object.create(null)
+  const blacklist = {}
+  const channels = {}
   const add = storeChanges(base, members, '+')
   const remove = storeChanges(base, members, '-')
+  let isStarted
 
   const ban = (id, reason) => {
     if (blacklist[id]) return blacklist[id]
     blacklist[id] = { reason, ts: Date.now() }
 
     // possible optimisation : queue changes and batch the save
-    writeFile(blacklistFile, JSON.parse(blacklist))
+    writeFile(serverInfo, JSON.stringify({
+      blacklist,
+      wait: channels.wait && channels.wait.id,
+      live: channels.live && channels.live.id,
+    }), 'utf8')
       .catch(logAndDie)
 
     return blacklist[id]
@@ -75,6 +86,7 @@ module.exports = (guild, channel) => {
 
   const registerUser = user => {
     user.user && (user = user.user)
+    if (members[user.id]) return add(user.id)
     const m = members[user.id] = {
       id: user.id,
       logs: [ { type: '+', ts: Date.now() } ],
@@ -83,36 +95,74 @@ module.exports = (guild, channel) => {
       avatar: user.avatar,
     }
 
-    return readFile(`${base}/${user.id}`, encoding)
+    return readFile(`${base}/${user.id}`, 'ascii')
       .then(parseFile)
       .then(logs => m.logs = m.logs
         .concat(logs)
         .sort(byTimestamp)
         .filter(doubleRecords))
       .catch(ENOENT.ignore)
-      .then(() => writeFile(mergeLogs(m.logs), encoding))
+      .then(() => writeFile(`${base}/${user.id}`, mergeLogs(m.logs), encoding))
   }
 
-  const load = mkdirp(base)
-    .then(() => Promise.all([ readdir(base) ]
-      .concat(channel.members.map(registerUser))))
-    .then(([ userFiles ]) => userFiles
-      .filter(id => !members[id])
+  const load = () => mkdirp(base)
+    .then(() => readdir(base))
+    .then(userFiles => userFiles
+      .filter(id => !members[id] && /^[0-9]+$/.test(id))
       .forEach(remove))
-    .then(() => readFile(blacklistFile))
+    .then(() => readFile(serverInfo, 'utf8'))
     .then(JSON.parse)
+    .then(info => {
+      channels.wait = guild.channels.get(info.wait)
+      channels.live = guild.channels.get(info.live)
+      return info.blacklist
+    })
     .then(each((id, banInfo) => blacklist[id] = banInfo))
     .catch(ENOENT.ignore)
     .catch(logAndDie)
 
-  return {
-    load,
+  const loadChannel = (type, name) => {
+    channels[type] = guild.channels.filterArray(channel =>
+      channel.type === 'voice'
+      && channel.name.trim().toLowerCase() === name)[0]
+
+  }
+
+  const $ = {
+    load: load(),
     guild,
-    channel,
+    channels,
     members,
     blacklist,
-    ban: (user, reason) => ban(user.id, reason),
-    join: user => members[user.id] ? add(user.id) : registerUser(user),
-    leave: user => remove(user.id),
+    loadWait: name => loadChannel('wait', name),
+    loadLive: name => loadChannel('live', name),
+    list: f.pipe([
+      () => members,
+      filter(u => !blacklist[u.id] && channel.wait.members.has(u.id)),
+      map.toArr(u => ({ id: u.id, ts: getTotalWait(calcTime(u.logs)) })),
+      r => r.sort(byTimestamp),
+      map(({ id, ts }, index) =>
+        `#${index + 1} <@${id}> depuis ${formatDate(new Date(ts))}`),
+      r => r.join('\n'),
+      r => `Prochain au guichet:\n${r}`,
+    ]),
+    isStarted: () => isStarted,
+    stop: () => {
+      channel.wait.members.forEach($.leave)
+      isStarted = false
+    },
+    start: () => {
+      isStarted = true
+      if (!channels.wait) Promise.resolve('Il faut specifier la liste des channels avec la commande')
+      return Promise.all(channel.wait.members.map(registerUser))
+    },
+    ban: (id, reason) => {
+      remove(id)
+      ban(id, reason)
+    },
+    join: user => isStarted && registerUser(user),
+    leave: user => isStarted && remove(user.id),
   }
+
+  return $
 }
