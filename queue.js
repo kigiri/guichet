@@ -105,7 +105,7 @@ module.exports = guild => {
       .then(() => writeFile(`${base}/${user.id}`, mergeLogs(m.logs), encoding))
   }
 
-  const load = () => mkdirp(base)
+  const load = mkdirp(base)
     .then(() => readdir(base))
     .then(userFiles => userFiles
       .filter(id => !members[id] && /^[0-9]+$/.test(id))
@@ -122,14 +122,19 @@ module.exports = guild => {
     .catch(logAndDie)
 
   const loadChannel = (type, name) => {
-    channels[type] = guild.channels.filterArray(channel =>
-      channel.type === 'voice'
-      && channel.name.trim().toLowerCase() === name)[0]
+    channels[type] = (name[0] === '#')
+      ? guild.channels.findKey('position', Number(name.slice(1)))
+      : guild.channels.filterArray(channel => channel.type === 'voice'
+          && channel.name.trim().toLowerCase() === name)[0]
+        || guild.channels.findKey('position', Number(name))
 
+    return channels[type]
+      ? `${channels[type].name} defini comme ${type} channel`
+      : `${name} n'est pas dans la liste des channels`
   }
 
   const $ = {
-    load: load(),
+    load,
     guild,
     channels,
     members,

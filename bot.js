@@ -6,25 +6,9 @@ const config = require('./config')
 const makeQueue = require('./queue')
 const bot = new discord.Client()
 const queue = Object.create(null)
-const findChannel = name => channel => channel.type === 'voice'
-  && channel.name.trim().toLowerCase() === channelName
-
-const loadChannels = guild => (channelName = `file d'attente`, liveName = 'live') => {
-    const channel = guild.channels.filterArray(findChannel(channelName))[0]
-    const live = guild.channels.filterArray(findChannel(liveName))[0]
-
-    const q = queue[guild.id] || (queue[guild.id] = makeQueue(guild))
-
-    channel && 
-    if (!channel || !live) {
-      queue[guild.id].setChannel(channel)
-      return false
-    }    
-  })
-}
 
 bot.login(config.botToken)
-  .then(() => bot.guilds.forEach(guild => loadChannels(guild)))
+  .then(() => bot.guilds.forEach(guild =>  queue[guild.id] = makeQueue(guild)))
   .then(() => console.log(`Connected to ${Object.keys(queue).length} channels`))
   .catch(console.error)
 
@@ -32,8 +16,8 @@ const actions = {
   list: q => q.list(),
   live: (q, ...name) => q.loadLive(name.join(' ')),
   wait: (q, ...name) => q.loadWait(name.join(' ')),
-  start: q => q.start(),
-  stop: q => q.stop(),
+  start: q => (q.start(), "debut de la file d'attente"),
+  stop: q => (q.stop(), 'arret de la file d\'attente'),
   ban: (q, user, ...reason) => {
     reason = reason.join(' ') || 'aucune raison'
     const id = user.indexOf('<@')
@@ -45,7 +29,14 @@ const actions = {
   },
 }
 
-const help = `${Object.keys(actions).join(', ')}`
+const help = `
+  \`list\` - Montre la file d'attente
+  \`live channel*\` - definie le channel a surveiller pour le live
+  \`wait channel*\` - definie le channel a surveiller pour la file d'attente
+  \`start\` - demarre la file d'attente
+  \`stop\` - arrete la file d'attente
+  \`ban @mention raison\` - bloque un utilisateur de la file d'attente (raison est optionnel)
+  * _un channel peu etre indiquer par son nom \`Salle d'Attente\` ou ca position \`#3\`_`
 
 bot.on('message', message => {
   const { content, channel } = message
@@ -54,7 +45,8 @@ bot.on('message', message => {
   const [ , actionKey, ...args ] = content.trim().split(' ').filter(Boolean)
   const action = actions[actionKey]
   if (!action) return message.reply(`\`${actionKey}\` est inconnue, ${help}`)
-  message.reply(action(q, ...args))
+  Promise.resolve(action(q, ...args))
+    .then((msg) => message.reply(msg))
 })
 
 bot.on('voiceStateUpdate', ({ guild, user }) => {
